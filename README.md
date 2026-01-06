@@ -55,14 +55,6 @@ The package performs **JIT compilation** of CUDA extensions locally via `torch.u
 pip install -e .
 ```
 
-#### From PyPI (if published)
-
-```bash
-pip install mamba-windows-cuda
-```
-注意：这需要项目已使用同名发布到 PyPI。
-Note: this requires the project to be published to PyPI under the same name.
-
 ### Usage
 
 #### Basic Usage
@@ -258,12 +250,6 @@ This repository is licensed under the MIT License. See [LICENSE](LICENSE).
 
 ```bash
 pip install -e .
-```
-
-#### 直接安装
-
-```bash
-pip install mamba-windows-cuda
 ```
 
 ### 使用方法
