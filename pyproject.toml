@@ -5,8 +5,16 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "mamba-windows-cuda"
 version = "0.1.0"
+description = "Windows-compatible CUDA implementation of Mamba selective-scan (N=16), with streaming state support."
+readme = "README.md"
 requires-python = ">=3.9"
+license = { file = "LICENSE" }
+keywords = ["mamba", "ssm", "selective-scan", "cuda", "windows", "pytorch"]
 dependencies = ["torch"]
+
+[project.urls]
+Source = "https://github.com/zouyuanqing/mamba-windows-cuda"
+Issues = "https://github.com/zouyuanqing/mamba-windows-cuda/issues"
 
 [tool.setuptools]
 packages = { find = { where = ["."], include = ["mamba_windows_cuda", "mamba_windows_cuda.*"] } }
