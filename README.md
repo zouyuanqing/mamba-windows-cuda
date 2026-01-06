@@ -4,11 +4,11 @@
 
 <div align="center">
 
-**[English](#mamba-windows-cuda)** | **[中文](#mamba-windows-cuda-1)**
+**[English](#english)** | **[中文](#中文)**
 
 </div>
 
-## English Version
+## English
 
 ### mamba-windows-cuda
 
@@ -55,11 +55,13 @@ The package performs **JIT compilation** of CUDA extensions locally via `torch.u
 pip install -e .
 ```
 
-#### Direct Installation
+#### From PyPI (if published)
 
 ```bash
 pip install mamba-windows-cuda
 ```
+注意：这需要项目已使用同名发布到 PyPI。
+Note: this requires the project to be published to PyPI under the same name.
 
 ### Usage
 
@@ -201,7 +203,7 @@ Please make sure to update tests as appropriate and follow the existing code sty
 
 ### License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This repository is licensed under the MIT License. See [LICENSE](LICENSE).
 
 ### Acknowledgments
 
@@ -211,7 +213,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ---
 
-## 中文版本
+## 中文
 
 ### mamba-windows-cuda
 
@@ -404,7 +406,7 @@ python -m unittest -v mamba_windows_cuda.tests.test_selective_scan
 
 ### 许可证
 
-本项目根据 MIT 许可证授权 - 详情请参见 [LICENSE](LICENSE) 文件。
+本仓库使用 MIT 许可证授权，详见 [LICENSE](LICENSE)。
 
 ### 致谢
 
