@@ -1,5 +1,6 @@
 import os
 import shutil
+import warnings
 import torch
 from torch.utils.cpp_extension import load_inline
 
@@ -14,6 +15,10 @@ def _ensure_msvc_env():
     try:
         vswhere = os.path.expandvars(r"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe")
         if not os.path.exists(vswhere):
+            warnings.warn(
+                "vswhere.exe not found. Please install Visual Studio or Build Tools. "
+                f"Expected at: {vswhere}"
+            )
             return
 
         cmd = [
@@ -31,23 +36,29 @@ def _ensure_msvc_env():
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
         vs_path = result.stdout.strip()
         if not vs_path:
+            warnings.warn(
+                "Visual Studio installation found but no VC tools detected. "
+                "Please install 'Desktop development with C++' workload."
+            )
             return
 
         batch_file = os.path.join(vs_path, "Common7", "Tools", "VsDevCmd.bat")
         if not os.path.exists(batch_file):
+            warnings.warn(f"VsDevCmd.bat not found at: {batch_file}")
             return
 
         cmd = f'"{batch_file}" -arch=x64 && set'
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
         if result.returncode != 0:
+            warnings.warn("VsDevCmd.bat execution failed. MSVC environment not set up.")
             return
 
         for line in result.stdout.splitlines():
             if "=" in line:
                 key, _, value = line.partition("=")
                 os.environ[key] = value
-    except Exception:
-        return
+    except Exception as e:
+        warnings.warn(f"Failed to auto-detect MSVC environment: {e}")
 
 
 _ensure_msvc_env()
@@ -55,7 +66,7 @@ _ensure_msvc_env()
 
 cuda_source = r"""
 #include <cuda_fp16.h>
-#include <ATen/ATen.h>
+#include <ATen/Aten.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <torch/extension.h>
 
@@ -68,7 +79,7 @@ __device__ __forceinline__ float load_to_float(const scalar_t* p) {
 
 template <>
 __device__ __forceinline__ float load_to_float<at::Half>(const at::Half* p) {
-    return __half2float(*reinterpret_cast<const __half*>(p));
+    return __half2float(reinterpret_cast<const __half*>(p));
 }
 
 template <typename scalar_t>
@@ -78,22 +89,21 @@ __device__ __forceinline__ void store_from_float(scalar_t* p, float v) {
 
 template <>
 __device__ __forceinline__ void store_from_float<at::Half>(at::Half* p, float v) {
-    *reinterpret_cast<__half*>(p) = __float2half_rn(v);
+    *reinterpret_cast<__half*>(p) = __float2half(v);
 }
 
 template <typename scalar_t, int WARPS_PER_BLOCK>
 __global__ void selective_scan_fwd_kernel_v4(
-    const scalar_t* __restrict__ u,      // [B, L, D]
-    const scalar_t* __restrict__ delta,  // [B, L, D]
-    const scalar_t* __restrict__ A,      // [D, N]
-    const scalar_t* __restrict__ B_ssm,  // [B, L, N]
-    const scalar_t* __restrict__ C_ssm,  // [B, L, N]
-    const scalar_t* __restrict__ D_ssm,  // [D]
-    const scalar_t* __restrict__ h_prev, // [B, D, N] (Optional, can be null)
-    scalar_t* __restrict__ h_last,       // [B, D, N] (Optional, can be null)
-    scalar_t* __restrict__ out,          // [B, L, D]
-    int B, int L, int D, int N
-) {
+    const scalar_t* __restrict__ u,       // [B, L, D]
+    const scalar_t* __restrict__ delta,   // [B, L, D]
+    const scalar_t* __restrict__ A,       // [D, N]
+    const scalar_t* __restrict__ B_ssm,   // [B, L, N]
+    const scalar_t* __restrict__ C_ssm,   // [B, L, N]
+    const scalar_t* __restrict__ D_ssm,   // [D]
+    const scalar_t* __restrict__ h_prev,  // [B, D, N] (Optional, can be null)
+    scalar_t* __restrict__ h_last,        // [B, D, N] (Optional, can be null)
+    scalar_t* __restrict__ out,           // [B, L, D]
+    int B, int L, int D, int N) {
     int lane = threadIdx.x;
     int warp_id = threadIdx.y;
     int b_idx = blockIdx.y;
@@ -146,14 +156,14 @@ __global__ void selective_scan_fwd_kernel_v4(
             float dt_u_B = delta_val * u_val * B_shared[lane];
             h_val = dA_exp * h_val + dt_u_B;
 
-            float y_contrib = h_val * C_shared[lane];
-            y_contrib += __shfl_down_sync(mask, y_contrib, 8);
-            y_contrib += __shfl_down_sync(mask, y_contrib, 4);
-            y_contrib += __shfl_down_sync(mask, y_contrib, 2);
-            y_contrib += __shfl_down_sync(mask, y_contrib, 1);
+            float y_contri = h_val * C_shared[lane];
+            y_contri += __shfl_down_sync(mask, y_contri, 8);
+            y_contri += __shfl_down_sync(mask, y_contri, 4);
+            y_contri += __shfl_down_sync(mask, y_contri, 2);
+            y_contri += __shfl_down_sync(mask, y_contri, 1);
 
             if (lane == 0) {
-                store_from_float(out_ptr + l * D, y_contrib + u_val * D_val);
+                store_from_float(out_ptr + l * D, y_contri + u_val * D_val);
             }
         }
         __syncthreads();
@@ -325,11 +335,11 @@ def _get_selective_scan_cuda_module():
 
     arch_flags = []
     if "TORCH_CUDA_ARCH_LIST" not in os.environ and torch.cuda.is_available():
-        maj, minr = torch.cuda.get_device_capability()
-        os.environ["TORCH_CUDA_ARCH_LIST"] = f"{maj}.{minr}"
+        major, minor = torch.cuda.get_device_capability()
+        os.environ["TORCH_CUDA_ARCH_LIST"] = f"{major}.{minor}"
         arch_flags = [
-            f"-gencode=arch=compute_{maj}{minr},code=sm_{maj}{minr}",
-            f"-gencode=arch=compute_{maj}{minr},code=compute_{maj}{minr}",
+            f"-gencode=arch=compute_{major}{minor},code=sm_{major}{minor}",
+            f"-gencode=arch=compute_{major}{minor},code=compute_{major}{minor}",
         ]
 
     _selective_scan_cuda_module = load_inline(
