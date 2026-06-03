@@ -49,7 +49,55 @@ class TestSelectiveScanCUDA(unittest.TestCase):
         self.assertTrue(torch.isfinite(ref).all(), "Reference output contains NaN/Inf")
         self.assertTrue(torch.isfinite(out).all(), "CUDA output contains NaN/Inf")
         diff = (out.float() - ref.float()).abs().max().item()
-        self.assertLess(diff, 1e-3)
+        self.assertLess(diff, 1e-3, f"FP16 max error {diff:.6f} exceeds threshold 1e-3")
+
+    def test_consistency_fp32(self):
+        if self.device == "cpu":
+            self.skipTest("CUDA not available")
+
+        B, L, D, N = 1, 1024, 256, 16
+        torch.manual_seed(42)
+        u = (torch.randn(B, L, D, device=self.device) * 0.1).float()
+        delta = (torch.ones(B, L, D, device=self.device) * 0.01).float()
+        A = (-torch.rand(D, N, device=self.device) * 0.1).float()
+        B_ssm = (torch.randn(B, L, N, device=self.device) * 0.1).float()
+        C_ssm = (torch.randn(B, L, N, device=self.device) * 0.1).float()
+        D_ssm = (torch.ones(D, device=self.device) * 0.1).float()
+        h_prev = torch.zeros(B, D, N, device=self.device).float()
+
+        with torch.no_grad():
+            out = self.kernel(u, delta, A, B_ssm, C_ssm, D_ssm, h_prev)
+            ref, _ = selective_scan_reference(u, delta, A, B_ssm, C_ssm, D_ssm, h_prev)
+
+        self.assertTrue(torch.isfinite(ref).all(), "Reference output contains NaN/Inf")
+        self.assertTrue(torch.isfinite(out).all(), "CUDA output contains NaN/Inf")
+        diff = (out - ref).abs().max().item()
+        self.assertLess(diff, 1e-4, f"FP32 max error {diff:.6f} exceeds threshold 1e-4")
+
+    def test_forward_with_state(self):
+        if self.device == "cpu":
+            self.skipTest("CUDA not available")
+
+        B, L, D, N = 1, 512, 256, 16
+        torch.manual_seed(7)
+        u = (torch.randn(B, L, D, device=self.device) * 0.1).half()
+        delta = (torch.ones(B, L, D, device=self.device) * 0.01).half()
+        A = (-torch.rand(D, N, device=self.device) * 0.1).half()
+        B_ssm = (torch.randn(B, L, N, device=self.device) * 0.1).half()
+        C_ssm = (torch.randn(B, L, N, device=self.device) * 0.1).half()
+        D_ssm = (torch.ones(D, device=self.device) * 0.1).half()
+
+        with torch.no_grad():
+            out, h_last = self.kernel.forward_with_state(u, delta, A, B_ssm, C_ssm, D_ssm, None)
+            ref_out, ref_h = selective_scan_reference(u, delta, A, B_ssm, C_ssm, D_ssm,
+                                                      torch.zeros(B, D, N, device=self.device).half())
+
+        self.assertTrue(torch.isfinite(out).all(), "CUDA output contains NaN/Inf")
+        self.assertTrue(torch.isfinite(h_last).all(), "CUDA h_last contains NaN/Inf")
+        out_diff = (out.float() - ref_out.float()).abs().max().item()
+        h_diff = (h_last.float() - ref_h.float()).abs().max().item()
+        self.assertLess(out_diff, 1e-3, f"forward_with_state output error {out_diff:.6f}")
+        self.assertLess(h_diff, 1e-3, f"forward_with_state h_last error {h_diff:.6f}")
 
     def test_large_shapes_and_streaming(self):
         if self.device == "cpu":
@@ -71,8 +119,9 @@ class TestSelectiveScanCUDA(unittest.TestCase):
 
             with torch.no_grad():
                 out = self.kernel(u, delta, A, B_ssm, C_ssm, D_ssm, None)
-            self.assertTrue(torch.isfinite(out).all())
+            self.assertTrue(torch.isfinite(out).all(), f"NaN/Inf in output for shape (B={B}, L={L}, D={D})")
 
+        # Streaming test: chunked concatenation with h_last
         B, D, N = 1, 2048, 16
         L_total = 1280 * 1280
         chunk_L = 16384
@@ -91,8 +140,8 @@ class TestSelectiveScanCUDA(unittest.TestCase):
                 C_ssm = (torch.randn(B, Lc, N, device=self.device) * 0.1).half()
                 out, h = self.kernel.forward_with_state(u, delta, A, B_ssm, C_ssm, D_ssm, h)
 
-        self.assertTrue(torch.isfinite(out).all())
-        self.assertTrue(torch.isfinite(h).all())
+        self.assertTrue(torch.isfinite(out).all(), "Streaming final output contains NaN/Inf")
+        self.assertTrue(torch.isfinite(h).all(), "Streaming final state contains NaN/Inf")
 
 
 if __name__ == "__main__":
