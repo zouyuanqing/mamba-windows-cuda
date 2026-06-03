@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+*.so
+*.pyd
+*.dll
+*.exp
+*.lib
+*.obj
+*.o
+torch_extensions/
