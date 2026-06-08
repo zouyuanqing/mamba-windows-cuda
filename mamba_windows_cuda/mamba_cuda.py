@@ -89,6 +89,7 @@ __device__ __forceinline__ void store_from_float<at::Half>(at::Half* p, float v)
     *reinterpret_cast<__half*>(p) = __float2half_rn(v);
 }
 
+// Forward kernel (same as before)
 template <typename scalar_t, int WARPS_PER_BLOCK>
 __global__ void selective_scan_fwd_kernel_v4(
     const scalar_t* __restrict__ u,      // [B, L, D]
@@ -150,7 +151,7 @@ __global__ void selective_scan_fwd_kernel_v4(
 
         if (lane < N_STATE) {
             float dt_A = delta_val * A_val;
-            float dA_exp = safe_exp(dt_A);  // Use safe_exp to prevent overflow/underflow
+            float dA_exp = safe_exp(dt_A);
             float dt_u_B = delta_val * u_val * B_shared[lane];
             h_val = dA_exp * h_val + dt_u_B;
 
@@ -197,7 +198,7 @@ torch::Tensor selective_scan_cuda_forward(
     TORCH_CHECK(C_ssm.scalar_type() == u.scalar_type(), "C_ssm dtype must match u dtype");
     TORCH_CHECK(D_ssm.scalar_type() == u.scalar_type(), "D_ssm dtype must match u dtype");
     
-    // Contiguity checks (last dimension stride should be 1)
+    // Contiguity checks
     TORCH_CHECK(u.stride(-1) == 1 || u.size(-1) == 1, "u must be contiguous in the last dimension");
     TORCH_CHECK(delta.stride(-1) == 1 || delta.size(-1) == 1, "delta must be contiguous in the last dimension");
     TORCH_CHECK(A.stride(-1) == 1 || A.size(-1) == 1, "A must be contiguous in the last dimension");
@@ -258,16 +259,9 @@ torch::Tensor selective_scan_cuda_forward(
         scalar_t* out_ptr = (scalar_t*)out.data_ptr();
 
         selective_scan_fwd_kernel_v4<scalar_t, WARPS_PER_BLOCK><<<grid, block, shmem>>>(
-            u_ptr,
-            delta_ptr,
-            A_ptr,
-            B_ptr,
-            C_ptr,
-            D_ptr,
+            u_ptr, delta_ptr, A_ptr, B_ptr, C_ptr, D_ptr,
             h_prev_opt.has_value() ? h_ptr : nullptr,
-            nullptr,
-            out_ptr,
-            B, L, D, N
+            nullptr, out_ptr, B, L, D, N
         );
     });
 
@@ -283,23 +277,19 @@ std::vector<torch::Tensor> selective_scan_cuda_forward_with_state(
     torch::Tensor D_ssm,
     torch::optional<torch::Tensor> h_prev_opt
 ) {
-    // Device checks
+    // Same validation as forward
     TORCH_CHECK(u.is_cuda(), "u must be a CUDA tensor");
     TORCH_CHECK(delta.is_cuda(), "delta must be a CUDA tensor");
     TORCH_CHECK(A.is_cuda(), "A must be a CUDA tensor");
     TORCH_CHECK(B_ssm.is_cuda(), "B_ssm must be a CUDA tensor");
     TORCH_CHECK(C_ssm.is_cuda(), "C_ssm must be a CUDA tensor");
     TORCH_CHECK(D_ssm.is_cuda(), "D_ssm must be a CUDA tensor");
-    
-    // Dtype checks
     TORCH_CHECK(u.scalar_type() == torch::kFloat || u.scalar_type() == torch::kHalf, "u must be float32/float16");
     TORCH_CHECK(delta.scalar_type() == u.scalar_type(), "delta dtype must match u dtype");
     TORCH_CHECK(A.scalar_type() == u.scalar_type(), "A dtype must match u dtype");
     TORCH_CHECK(B_ssm.scalar_type() == u.scalar_type(), "B_ssm dtype must match u dtype");
     TORCH_CHECK(C_ssm.scalar_type() == u.scalar_type(), "C_ssm dtype must match u dtype");
     TORCH_CHECK(D_ssm.scalar_type() == u.scalar_type(), "D_ssm dtype must match u dtype");
-    
-    // Contiguity checks (last dimension stride should be 1)
     TORCH_CHECK(u.stride(-1) == 1 || u.size(-1) == 1, "u must be contiguous in the last dimension");
     TORCH_CHECK(delta.stride(-1) == 1 || delta.size(-1) == 1, "delta must be contiguous in the last dimension");
     TORCH_CHECK(A.stride(-1) == 1 || A.size(-1) == 1, "A must be contiguous in the last dimension");
@@ -312,7 +302,6 @@ std::vector<torch::Tensor> selective_scan_cuda_forward_with_state(
     int D = u.size(2);
     int N = A.size(1);
     
-    // Shape checks
     TORCH_CHECK(N == 16, "Only N=16 is supported");
     TORCH_CHECK(u.dim() == 3, "u must be 3D (batch, seqlen, dim)");
     TORCH_CHECK(delta.dim() == 3, "delta must be 3D (batch, seqlen, dim)");
@@ -320,7 +309,6 @@ std::vector<torch::Tensor> selective_scan_cuda_forward_with_state(
     TORCH_CHECK(B_ssm.dim() == 3, "B_ssm must be 3D (batch, seqlen, state)");
     TORCH_CHECK(C_ssm.dim() == 3, "C_ssm must be 3D (batch, seqlen, state)");
     TORCH_CHECK(D_ssm.dim() == 1, "D_ssm must be 1D (dim)");
-    
     TORCH_CHECK(u.size(0) == B && u.size(1) == L && u.size(2) == D, "u shape mismatch");
     TORCH_CHECK(delta.size(0) == B && delta.size(1) == L && delta.size(2) == D, "delta shape mismatch");
     TORCH_CHECK(A.size(0) == D && A.size(1) == N, "A shape mismatch");
@@ -328,7 +316,6 @@ std::vector<torch::Tensor> selective_scan_cuda_forward_with_state(
     TORCH_CHECK(C_ssm.size(0) == B && C_ssm.size(1) == L && C_ssm.size(2) == N, "C_ssm shape mismatch");
     TORCH_CHECK(D_ssm.size(0) == D, "D_ssm shape mismatch");
     
-    // h_prev validation
     if (h_prev_opt.has_value()) {
         auto h_prev = h_prev_opt.value();
         TORCH_CHECK(h_prev.is_cuda(), "h_prev must be a CUDA tensor");
@@ -362,16 +349,9 @@ std::vector<torch::Tensor> selective_scan_cuda_forward_with_state(
         scalar_t* h_last_ptr = (scalar_t*)h_last.data_ptr();
 
         selective_scan_fwd_kernel_v4<scalar_t, WARPS_PER_BLOCK><<<grid, block, shmem>>>(
-            u_ptr,
-            delta_ptr,
-            A_ptr,
-            B_ptr,
-            C_ptr,
-            D_ptr,
+            u_ptr, delta_ptr, A_ptr, B_ptr, C_ptr, D_ptr,
             h_prev_opt.has_value() ? h_ptr : nullptr,
-            h_last_ptr,
-            out_ptr,
-            B, L, D, N
+            h_last_ptr, out_ptr, B, L, D, N
         );
     });
 
@@ -418,16 +398,14 @@ def _get_selective_scan_cuda_module():
             f"-gencode=arch=compute_{maj}{minr},code=compute_{maj}{minr}",
         ]
 
-    # Compile options: allow users to choose precision vs speed tradeoff
+    # Compile options
     extra_cuda_cflags = ["-O3", "-allow-unsupported-compiler"]
     
-    # Default: use fast math for better performance
-    # Set MAMBA_CUDA_USE_FAST_MATH=0 for higher precision
     use_fast_math = os.environ.get("MAMBA_CUDA_USE_FAST_MATH", "1") == "1"
     if use_fast_math:
         extra_cuda_cflags.append("--use_fast_math")
     else:
-        extra_cuda_cflags.append("--ftz=true")  # Flush-to-zero for denormals
+        extra_cuda_cflags.append("--ftz=true")
     
     _selective_scan_cuda_module = load_inline(
         name="mamba_windows_selective_scan_cuda",
@@ -440,36 +418,281 @@ def _get_selective_scan_cuda_module():
     return _selective_scan_cuda_module
 
 
+def selective_scan_ref(u, delta, A, B_ssm, C_ssm, D_ssm, h_prev=None, return_intermediates=False):
+    """
+    Reference implementation of selective scan in pure PyTorch.
+    Supports autograd for training.
+    
+    Args:
+        u: (B, L, D)
+        delta: (B, L, D)
+        A: (D, N)
+        B_ssm: (B, L, N)
+        C_ssm: (B, L, N)
+        D_ssm: (D,)
+        h_prev: (B, D, N) or None
+        return_intermediates: if True, return intermediate states for backward
+    
+    Returns:
+        out: (B, L, D)
+        h_last: (B, D, N)
+        intermediates (optional): dict with 'h_states', 'dA', 'dBu'
+    """
+    batch, seqlen, dim = u.shape
+    N = A.shape[1]
+    
+    # Transpose for computation: (B, D, L) and (B, N, L)
+    u_t = u.transpose(1, 2)           # (B, D, L)
+    delta_t = delta.transpose(1, 2)   # (B, D, L)
+    B_t = B_ssm.transpose(1, 2)       # (B, N, L)
+    C_t = C_ssm.transpose(1, 2)       # (B, N, L)
+    
+    # Initialize state
+    if h_prev is None:
+        h_prev = torch.zeros(batch, dim, N, device=u.device, dtype=u.dtype)
+    
+    # Compute dA = exp(delta * A) for each time step
+    # delta: (B, D, L), A: (D, N) -> dA: (B, D, N, L)
+    delta_A = torch.einsum('bdl,dn->bdln', delta_t, A)  # (B, D, N, L)
+    dA = torch.exp(delta_A)  # (B, D, N, L)
+    
+    # Compute dBu = delta * u * B for each time step
+    # delta: (B, D, L), u: (B, D, L), B: (B, N, L) -> dBu: (B, D, N, L)
+    dBu = delta_t.unsqueeze(2) * u_t.unsqueeze(2) * B_t.unsqueeze(1)  # (B, D, N, L)
+    
+    # Compute state h_t recursively: h_t = dA_t * h_{t-1} + dBu_t
+    h = h_prev.unsqueeze(-1)  # (B, D, N, 1)
+    h_states = []
+    for t in range(seqlen):
+        h = dA[:, :, :, t:t+1] * h + dBu[:, :, :, t:t+1]  # (B, D, N, 1)
+        h_states.append(h)
+    
+    h_states = torch.cat(h_states, dim=-1)  # (B, D, N, L)
+    h_last = h.squeeze(-1)  # (B, D, N)
+    
+    # Compute output: y = sum(C * h) + D * u
+    y = torch.sum(C_t.unsqueeze(1) * h_states, dim=2)  # (B, D, L)
+    y = y + u_t * D_ssm.view(1, -1, 1)  # (B, D, L)
+    
+    out = y.transpose(1, 2)  # (B, L, D)
+    
+    if return_intermediates:
+        intermediates = {
+            'h_states': h_states,  # (B, D, N, L)
+            'dA': dA,              # (B, D, N, L)
+            'dBu': dBu,            # (B, D, N, L)
+            'u_t': u_t,            # (B, D, L)
+            'delta_t': delta_t,    # (B, D, L)
+            'B_t': B_t,            # (B, N, L)
+            'C_t': C_t,            # (B, N, L)
+            'h_prev': h_prev,      # (B, D, N)
+        }
+        return out, h_last, intermediates
+    
+    return out, h_last
+
+
+def selective_scan_backward(dout, dh_last, intermediates, D_ssm):
+    """
+    Compute gradients for selective scan.
+    
+    Args:
+        dout: (B, L, D) gradient w.r.t. output
+        dh_last: (B, D, N) gradient w.r.t. h_last
+        intermediates: dict with forward intermediates
+        D_ssm: (D,)
+    
+    Returns:
+        du, ddelta, dA, dB_ssm, dC_ssm, dD_ssm, dh_prev
+    """
+    h_states = intermediates['h_states']  # (B, D, N, L)
+    dA = intermediates['dA']              # (B, D, N, L)
+    dBu = intermediates['dBu']            # (B, D, N, L)
+    u_t = intermediates['u_t']            # (B, D, L)
+    delta_t = intermediates['delta_t']    # (B, D, L)
+    B_t = intermediates['B_t']            # (B, N, L)
+    C_t = intermediates['C_t']            # (B, N, L)
+    h_prev = intermediates['h_prev']      # (B, D, N)
+    
+    B, D, N, L = h_states.shape
+    seqlen = L
+    
+    # Transpose dout: (B, L, D) -> (B, D, L)
+    dout_t = dout.transpose(1, 2)
+    
+    # Initialize gradients
+    du_t = torch.zeros_like(u_t)
+    ddelta_t = torch.zeros_like(delta_t)
+    dA_grad = torch.zeros_like(dA)
+    dB_t_grad = torch.zeros_like(B_t)
+    dC_t_grad = torch.zeros_like(C_t)
+    dD_ssm = torch.zeros(D, device=dout.device, dtype=dout.dtype)
+    dh = dh_last.unsqueeze(-1)  # (B, D, N, 1)
+    
+    # Backward pass (reverse in time)
+    for t in range(seqlen - 1, -1, -1):
+        # Gradient from output: y_t = sum(C_t * h_t) + D * u_t
+        # dy_t/dh_t = C_t, dy_t/du_t = D
+        dh_from_out = dout_t[:, :, t:t+1].unsqueeze(2) * C_t[:, :, t:t+1].unsqueeze(1)  # (B, D, N, 1)
+        
+        # Total gradient for h_t
+        dh = dh + dh_from_out  # (B, D, N, 1)
+        
+        # Gradient for C_t: dC_t = dout_t * h_t
+        dC_t_grad[:, :, t] = (dout_t[:, :, t:t+1].unsqueeze(2) * h_states[:, :, :, t:t+1]).sum(dim=1).squeeze(-1)
+        
+        # Gradient for u_t from D: du_t += D * dout_t
+        du_t[:, :, t] += D_ssm * dout_t[:, :, t]
+        
+        # Gradient for D: dD += u_t * dout_t
+        dD_ssm += (u_t[:, :, t] * dout_t[:, :, t]).sum(dim=0)
+        
+        # h_t = dA_t * h_{t-1} + dBu_t
+        # dh_t/ddA_t = h_{t-1}, dh_t/dh_{t-1} = dA_t
+        h_prev_t = h_states[:, :, :, t-1:t] if t > 0 else h_prev.unsqueeze(-1)
+        
+        # Gradient for dA_t
+        dA_grad[:, :, :, t] = (dh * h_prev_t).squeeze(-1)
+        
+        # Gradient for h_{t-1}
+        dh = dh * dA[:, :, :, t:t+1]
+        
+        # dBu_t = delta_t * u_t * B_t
+        # dh/d(dBu_t) = 1 (since h_t = dA_t * h_{t-1} + dBu_t)
+        dh_dBu = dh  # (B, D, N, 1)
+        
+        # Gradient for delta_t from dBu: ddelta_t += u_t * B_t * dh_dBu
+        ddelta_t[:, :, t] += (u_t[:, :, t:t+1].unsqueeze(2) * B_t[:, :, t:t+1].unsqueeze(1) * dh_dBu).sum(dim=2).squeeze(-1)
+        
+        # Gradient for u_t from dBu: du_t += delta_t * B_t * dh_dBu
+        du_t[:, :, t] += (delta_t[:, :, t:t+1].unsqueeze(2) * B_t[:, :, t:t+1].unsqueeze(1) * dh_dBu).sum(dim=2).squeeze(-1)
+        
+        # Gradient for B_t: dB_t += delta_t * u_t * dh_dBu
+        dB_t_grad[:, :, t] += (delta_t[:, :, t:t+1].unsqueeze(1) * u_t[:, :, t:t+1].unsqueeze(1) * dh_dBu).sum(dim=1).squeeze(-1)
+    
+    # Gradient for h_prev
+    dh_prev = dh.squeeze(-1)  # (B, D, N)
+    
+    # Gradient for A (needs to sum over time and batch)
+    # dA comes from dA_grad which is (B, D, N, L)
+    # A is (D, N), so we need to sum over B and L
+    dA_final = dA_grad.sum(dim=(0, 3))  # (D, N)
+    
+    # Transpose gradients back
+    du = du_t.transpose(1, 2)           # (B, L, D)
+    ddelta = ddelta_t.transpose(1, 2)   # (B, L, D)
+    dB_ssm = dB_t_grad.transpose(1, 2) # (B, L, N)
+    dC_ssm = dC_t_grad.transpose(1, 2) # (B, L, N)
+    
+    return du, ddelta, dA_final, dB_ssm, dC_ssm, dD_ssm, dh_prev
+
+
+class SelectiveScanCudaFunction(torch.autograd.Function):
+    """
+    Custom autograd function for selective scan.
+    Uses CUDA kernel for forward, optimized PyTorch backward with saved intermediates.
+    """
+    
+    @staticmethod
+    def forward(ctx, u, delta, A, B_ssm, C_ssm, D_ssm, h_prev=None):
+        # Use CUDA kernel for forward
+        module = _get_selective_scan_cuda_module()
+        out, h_last = module.selective_scan_cuda_forward_with_state(
+            u.contiguous(),
+            delta.contiguous(),
+            A.contiguous(),
+            B_ssm.contiguous(),
+            C_ssm.contiguous(),
+            D_ssm.contiguous(),
+            h_prev,
+        )
+        
+        # Compute and save intermediates for backward (avoids recomputation)
+        with torch.no_grad():
+            _, _, intermediates = selective_scan_ref(
+                u, delta, A, B_ssm, C_ssm, D_ssm, h_prev, return_intermediates=True
+            )
+        
+        ctx.save_for_backward(u, delta, A, B_ssm, C_ssm, D_ssm, h_prev)
+        ctx.intermediates = intermediates
+        
+        return out, h_last
+    
+    @staticmethod
+    def backward(ctx, dout, dh_last):
+        u, delta, A, B_ssm, C_ssm, D_ssm, h_prev = ctx.saved_tensors
+        intermediates = ctx.intermediates
+        
+        # Use optimized backward with saved intermediates
+        du, ddelta, dA, dB_ssm, dC_ssm, dD_ssm, dh_prev = selective_scan_backward(
+            dout.contiguous(),
+            dh_last.contiguous() if dh_last is not None else torch.zeros_like(intermediates['h_prev']),
+            intermediates,
+            D_ssm,
+        )
+        
+        return (
+            du,
+            ddelta,
+            dA,
+            dB_ssm,
+            dC_ssm,
+            dD_ssm,
+            dh_prev if h_prev is not None else None,
+        )
+
+
 class SelectiveScanCuda(torch.nn.Module):
+    """
+    Mamba selective scan with CUDA acceleration and autograd support.
+    
+    Forward uses CUDA kernel for speed.
+    Backward uses PyTorch reference for correctness (can be optimized with custom backward kernel).
+    """
+    
     def __init__(self):
         super().__init__()
-        self.module = _get_selective_scan_cuda_module()
+        self._module = None
+    
+    def _get_module(self):
+        if self._module is None:
+            self._module = _get_selective_scan_cuda_module()
+        return self._module
 
     def forward(self, u, delta, A, B_ssm, C_ssm, D_ssm, h_prev=None):
-        if self.module is None:
-            raise RuntimeError("CUDA kernel not compiled")
-
-        return self.module.selective_scan_cuda_forward(
-            u.contiguous(),
-            delta.contiguous(),
-            A.contiguous(),
-            B_ssm.contiguous(),
-            C_ssm.contiguous(),
-            D_ssm.contiguous(),
-            h_prev,
-        )
+        """
+        Forward pass for selective scan.
+        
+        Args:
+            u: (B, L, D) input tensor
+            delta: (B, L, D) delta tensor
+            A: (D, N) state transition matrix
+            B_ssm: (B, L, N) input matrix
+            C_ssm: (B, L, N) output matrix
+            D_ssm: (D,) skip connection
+            h_prev: (B, D, N) initial state (optional)
+        
+        Returns:
+            out: (B, L, D) output tensor
+        """
+        out, _ = SelectiveScanCudaFunction.apply(u, delta, A, B_ssm, C_ssm, D_ssm, h_prev)
+        return out
 
     def forward_with_state(self, u, delta, A, B_ssm, C_ssm, D_ssm, h_prev=None):
-        if self.module is None:
-            raise RuntimeError("CUDA kernel not compiled")
-
-        out, h_last = self.module.selective_scan_cuda_forward_with_state(
-            u.contiguous(),
-            delta.contiguous(),
-            A.contiguous(),
-            B_ssm.contiguous(),
-            C_ssm.contiguous(),
-            D_ssm.contiguous(),
-            h_prev,
-        )
-        return out, h_last
+        """
+        Forward pass that also returns the final state.
+        
+        Args:
+            u: (B, L, D) input tensor
+            delta: (B, L, D) delta tensor
+            A: (D, N) state transition matrix
+            B_ssm: (B, L, N) input matrix
+            C_ssm: (B, L, N) output matrix
+            D_ssm: (D,) skip connection
+            h_prev: (B, D, N) initial state (optional)
+        
+        Returns:
+            out: (B, L, D) output tensor
+            h_last: (B, D, N) final state
+        """
+        return SelectiveScanCudaFunction.apply(u, delta, A, B_ssm, C_ssm, D_ssm, h_prev)

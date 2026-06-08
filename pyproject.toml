@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mamba-windows-cuda"
-version = "0.2.0"
+version = "0.3.0"
 description = "Windows-compatible CUDA implementation of Mamba selective-scan (N=16), with streaming state support."
 readme = "README.md"
 requires-python = ">=3.9"

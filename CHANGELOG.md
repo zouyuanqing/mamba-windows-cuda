@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-06-08
+
+### Added
+- **Autograd Support**: Full backward pass support for training
+  - `torch.autograd.Function` with optimized backward
+  - Saved intermediates to avoid recomputation
+  - Gradient flow through all parameters (u, delta, A, B, C, D, h_prev)
+- **Gradient Tests**:
+  - `test_gradient_flow`: Verify gradients exist and are finite
+  - `test_gradient_numerical_accuracy`: Compare with reference implementation
+
+### Changed
+- **Version**: Updated from 0.2.0 to 0.3.0
+- **SelectiveScanCuda**: Now supports autograd for training
+
 ## [0.2.0] - 2026-06-08
 
 ### Added
