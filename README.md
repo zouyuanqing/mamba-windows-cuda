@@ -288,14 +288,25 @@ from mamba_windows_cuda import SelectiveScanCuda
 
 kernel = SelectiveScanCuda().cuda()
 
+# 准备参数（示例：2 个 chunk，每个 1024 步，D=256）
+B, D, N = 1, 256, 16
+A = (-torch.rand(D, N, device='cuda') * 0.1).half()
+D_ssm = torch.ones(D, device='cuda').half()
+
 # 初始化状态
-h = torch.zeros(1, 2048, 16, device='cuda').half()
+h = torch.zeros(B, D, N, device='cuda').half()
 
 # 分块处理序列
-for chunk in sequence_chunks:
-    out, h = kernel.forward_with_state(chunk['u'], chunk['delta'], 
-                                      chunk['A'], chunk['B'], 
-                                      chunk['C'], chunk['D'], h_prev=h)
+for i in range(2):
+    L = 1024
+    u = torch.randn(B, L, D, device='cuda').half()
+    delta = torch.ones(B, L, D, device='cuda').half() * 0.01
+    B_ssm = torch.randn(B, L, N, device='cuda').half() * 0.1
+    C_ssm = torch.randn(B, L, N, device='cuda').half() * 0.1
+    
+    # 使用 h_prev 传入上一个 chunk 的状态
+    out, h = kernel.forward_with_state(u, delta, A, B_ssm, C_ssm, D_ssm, h_prev=h)
+    print(f"Chunk {i}: output shape = {out.shape}, state shape = {h.shape}")
 ```
 
 ### API 参考
@@ -362,11 +373,21 @@ python -m unittest -v mamba_windows_cuda.tests.test_selective_scan
 
 #### 测试覆盖
 
-- 与参考实现的 FP16 数值一致性（误差阈值）
+- 与参考实现的 FP16/FP32 数值一致性（误差阈值）
+- 非零初始状态测试（流式/分块场景）
+- 流式一致性测试（分块执行 vs 全序列执行）
 - 长序列和极限尺寸：`L=16384/32768`，`D=768/1024/2048`
 - 图像特征序列流式处理：`L=1280*1280`，`D=2048`（使用 `h_last` 的分块串联）
+- 输入验证测试（错误形状、错误类型）
+- 数值稳定性测试（极端值）
 
 ### 性能
+
+运行 benchmark 脚本查看性能：
+
+```bash
+python benchmark.py
+```
 
 此实现在 Windows 上进行了优化，为 Mamba 模型提供高效的选择性扫描操作。它包括：
 
@@ -374,6 +395,7 @@ python -m unittest -v mamba_windows_cuda.tests.test_selective_scan
 - 用于高效归约的 Warp 级原语
 - 支持 FP16 和 FP32 精度
 - 针对不同张量尺寸优化的内核启动参数
+- 安全指数函数防止数值溢出/下溢
 
 ### 贡献
 

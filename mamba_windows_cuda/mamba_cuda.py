@@ -61,6 +61,14 @@ cuda_source = r"""
 
 #define N_STATE 16
 
+// Safe exponential function to prevent overflow/underflow
+__device__ __forceinline__ float safe_exp(float x) {
+    const float max_exp = 88.0f;  // exp(88) ≈ 1.6e38
+    const float min_exp = -88.0f; // exp(-88) ≈ 6.3e-39
+    x = fminf(fmaxf(x, min_exp), max_exp);
+    return __expf(x);
+}
+
 template <typename scalar_t>
 __device__ __forceinline__ float load_to_float(const scalar_t* p) {
     return static_cast<float>(*p);
@@ -142,7 +150,7 @@ __global__ void selective_scan_fwd_kernel_v4(
 
         if (lane < N_STATE) {
             float dt_A = delta_val * A_val;
-            float dA_exp = __expf(dt_A);
+            float dA_exp = safe_exp(dt_A);  // Use safe_exp to prevent overflow/underflow
             float dt_u_B = delta_val * u_val * B_shared[lane];
             h_val = dA_exp * h_val + dt_u_B;
 
@@ -173,21 +181,60 @@ torch::Tensor selective_scan_cuda_forward(
     torch::Tensor D_ssm,
     torch::optional<torch::Tensor> h_prev_opt
 ) {
+    // Device checks
+    TORCH_CHECK(u.is_cuda(), "u must be a CUDA tensor");
+    TORCH_CHECK(delta.is_cuda(), "delta must be a CUDA tensor");
+    TORCH_CHECK(A.is_cuda(), "A must be a CUDA tensor");
+    TORCH_CHECK(B_ssm.is_cuda(), "B_ssm must be a CUDA tensor");
+    TORCH_CHECK(C_ssm.is_cuda(), "C_ssm must be a CUDA tensor");
+    TORCH_CHECK(D_ssm.is_cuda(), "D_ssm must be a CUDA tensor");
+    
+    // Dtype checks
     TORCH_CHECK(u.scalar_type() == torch::kFloat || u.scalar_type() == torch::kHalf, "u must be float32/float16");
     TORCH_CHECK(delta.scalar_type() == u.scalar_type(), "delta dtype must match u dtype");
     TORCH_CHECK(A.scalar_type() == u.scalar_type(), "A dtype must match u dtype");
     TORCH_CHECK(B_ssm.scalar_type() == u.scalar_type(), "B_ssm dtype must match u dtype");
     TORCH_CHECK(C_ssm.scalar_type() == u.scalar_type(), "C_ssm dtype must match u dtype");
     TORCH_CHECK(D_ssm.scalar_type() == u.scalar_type(), "D_ssm dtype must match u dtype");
-    if (h_prev_opt.has_value()) {
-        TORCH_CHECK(h_prev_opt.value().scalar_type() == u.scalar_type(), "h_prev dtype must match u dtype");
-    }
+    
+    // Contiguity checks (last dimension stride should be 1)
+    TORCH_CHECK(u.stride(-1) == 1 || u.size(-1) == 1, "u must be contiguous in the last dimension");
+    TORCH_CHECK(delta.stride(-1) == 1 || delta.size(-1) == 1, "delta must be contiguous in the last dimension");
+    TORCH_CHECK(A.stride(-1) == 1 || A.size(-1) == 1, "A must be contiguous in the last dimension");
+    TORCH_CHECK(B_ssm.stride(-1) == 1 || B_ssm.size(-1) == 1, "B_ssm must be contiguous in the last dimension");
+    TORCH_CHECK(C_ssm.stride(-1) == 1 || C_ssm.size(-1) == 1, "C_ssm must be contiguous in the last dimension");
+    TORCH_CHECK(D_ssm.stride(-1) == 1 || D_ssm.size(-1) == 1, "D_ssm must be contiguous in the last dimension");
 
     int B = u.size(0);
     int L = u.size(1);
     int D = u.size(2);
     int N = A.size(1);
+    
+    // Shape checks
     TORCH_CHECK(N == 16, "Only N=16 is supported");
+    TORCH_CHECK(u.dim() == 3, "u must be 3D (batch, seqlen, dim)");
+    TORCH_CHECK(delta.dim() == 3, "delta must be 3D (batch, seqlen, dim)");
+    TORCH_CHECK(A.dim() == 2, "A must be 2D (dim, state)");
+    TORCH_CHECK(B_ssm.dim() == 3, "B_ssm must be 3D (batch, seqlen, state)");
+    TORCH_CHECK(C_ssm.dim() == 3, "C_ssm must be 3D (batch, seqlen, state)");
+    TORCH_CHECK(D_ssm.dim() == 1, "D_ssm must be 1D (dim)");
+    
+    TORCH_CHECK(u.size(0) == B && u.size(1) == L && u.size(2) == D, "u shape mismatch");
+    TORCH_CHECK(delta.size(0) == B && delta.size(1) == L && delta.size(2) == D, "delta shape mismatch");
+    TORCH_CHECK(A.size(0) == D && A.size(1) == N, "A shape mismatch");
+    TORCH_CHECK(B_ssm.size(0) == B && B_ssm.size(1) == L && B_ssm.size(2) == N, "B_ssm shape mismatch");
+    TORCH_CHECK(C_ssm.size(0) == B && C_ssm.size(1) == L && C_ssm.size(2) == N, "C_ssm shape mismatch");
+    TORCH_CHECK(D_ssm.size(0) == D, "D_ssm shape mismatch");
+    
+    // h_prev validation
+    if (h_prev_opt.has_value()) {
+        auto h_prev = h_prev_opt.value();
+        TORCH_CHECK(h_prev.is_cuda(), "h_prev must be a CUDA tensor");
+        TORCH_CHECK(h_prev.scalar_type() == u.scalar_type(), "h_prev dtype must match u dtype");
+        TORCH_CHECK(h_prev.stride(-1) == 1 || h_prev.size(-1) == 1, "h_prev must be contiguous in the last dimension");
+        TORCH_CHECK(h_prev.dim() == 3, "h_prev must be 3D (batch, dim, state)");
+        TORCH_CHECK(h_prev.size(0) == B && h_prev.size(1) == D && h_prev.size(2) == N, "h_prev shape must be (B, D, N)");
+    }
 
     auto out = torch::empty_like(u);
     const void* h_prev_ptr = nullptr;
@@ -236,21 +283,60 @@ std::vector<torch::Tensor> selective_scan_cuda_forward_with_state(
     torch::Tensor D_ssm,
     torch::optional<torch::Tensor> h_prev_opt
 ) {
+    // Device checks
+    TORCH_CHECK(u.is_cuda(), "u must be a CUDA tensor");
+    TORCH_CHECK(delta.is_cuda(), "delta must be a CUDA tensor");
+    TORCH_CHECK(A.is_cuda(), "A must be a CUDA tensor");
+    TORCH_CHECK(B_ssm.is_cuda(), "B_ssm must be a CUDA tensor");
+    TORCH_CHECK(C_ssm.is_cuda(), "C_ssm must be a CUDA tensor");
+    TORCH_CHECK(D_ssm.is_cuda(), "D_ssm must be a CUDA tensor");
+    
+    // Dtype checks
     TORCH_CHECK(u.scalar_type() == torch::kFloat || u.scalar_type() == torch::kHalf, "u must be float32/float16");
     TORCH_CHECK(delta.scalar_type() == u.scalar_type(), "delta dtype must match u dtype");
     TORCH_CHECK(A.scalar_type() == u.scalar_type(), "A dtype must match u dtype");
     TORCH_CHECK(B_ssm.scalar_type() == u.scalar_type(), "B_ssm dtype must match u dtype");
     TORCH_CHECK(C_ssm.scalar_type() == u.scalar_type(), "C_ssm dtype must match u dtype");
     TORCH_CHECK(D_ssm.scalar_type() == u.scalar_type(), "D_ssm dtype must match u dtype");
-    if (h_prev_opt.has_value()) {
-        TORCH_CHECK(h_prev_opt.value().scalar_type() == u.scalar_type(), "h_prev dtype must match u dtype");
-    }
+    
+    // Contiguity checks (last dimension stride should be 1)
+    TORCH_CHECK(u.stride(-1) == 1 || u.size(-1) == 1, "u must be contiguous in the last dimension");
+    TORCH_CHECK(delta.stride(-1) == 1 || delta.size(-1) == 1, "delta must be contiguous in the last dimension");
+    TORCH_CHECK(A.stride(-1) == 1 || A.size(-1) == 1, "A must be contiguous in the last dimension");
+    TORCH_CHECK(B_ssm.stride(-1) == 1 || B_ssm.size(-1) == 1, "B_ssm must be contiguous in the last dimension");
+    TORCH_CHECK(C_ssm.stride(-1) == 1 || C_ssm.size(-1) == 1, "C_ssm must be contiguous in the last dimension");
+    TORCH_CHECK(D_ssm.stride(-1) == 1 || D_ssm.size(-1) == 1, "D_ssm must be contiguous in the last dimension");
 
     int B = u.size(0);
     int L = u.size(1);
     int D = u.size(2);
     int N = A.size(1);
+    
+    // Shape checks
     TORCH_CHECK(N == 16, "Only N=16 is supported");
+    TORCH_CHECK(u.dim() == 3, "u must be 3D (batch, seqlen, dim)");
+    TORCH_CHECK(delta.dim() == 3, "delta must be 3D (batch, seqlen, dim)");
+    TORCH_CHECK(A.dim() == 2, "A must be 2D (dim, state)");
+    TORCH_CHECK(B_ssm.dim() == 3, "B_ssm must be 3D (batch, seqlen, state)");
+    TORCH_CHECK(C_ssm.dim() == 3, "C_ssm must be 3D (batch, seqlen, state)");
+    TORCH_CHECK(D_ssm.dim() == 1, "D_ssm must be 1D (dim)");
+    
+    TORCH_CHECK(u.size(0) == B && u.size(1) == L && u.size(2) == D, "u shape mismatch");
+    TORCH_CHECK(delta.size(0) == B && delta.size(1) == L && delta.size(2) == D, "delta shape mismatch");
+    TORCH_CHECK(A.size(0) == D && A.size(1) == N, "A shape mismatch");
+    TORCH_CHECK(B_ssm.size(0) == B && B_ssm.size(1) == L && B_ssm.size(2) == N, "B_ssm shape mismatch");
+    TORCH_CHECK(C_ssm.size(0) == B && C_ssm.size(1) == L && C_ssm.size(2) == N, "C_ssm shape mismatch");
+    TORCH_CHECK(D_ssm.size(0) == D, "D_ssm shape mismatch");
+    
+    // h_prev validation
+    if (h_prev_opt.has_value()) {
+        auto h_prev = h_prev_opt.value();
+        TORCH_CHECK(h_prev.is_cuda(), "h_prev must be a CUDA tensor");
+        TORCH_CHECK(h_prev.scalar_type() == u.scalar_type(), "h_prev dtype must match u dtype");
+        TORCH_CHECK(h_prev.stride(-1) == 1 || h_prev.size(-1) == 1, "h_prev must be contiguous in the last dimension");
+        TORCH_CHECK(h_prev.dim() == 3, "h_prev must be 3D (batch, dim, state)");
+        TORCH_CHECK(h_prev.size(0) == B && h_prev.size(1) == D && h_prev.size(2) == N, "h_prev shape must be (B, D, N)");
+    }
 
     auto out = torch::empty_like(u);
     auto h_last = torch::empty({B, D, N}, u.options());
@@ -332,13 +418,24 @@ def _get_selective_scan_cuda_module():
             f"-gencode=arch=compute_{maj}{minr},code=compute_{maj}{minr}",
         ]
 
+    # Compile options: allow users to choose precision vs speed tradeoff
+    extra_cuda_cflags = ["-O3", "-allow-unsupported-compiler"]
+    
+    # Default: use fast math for better performance
+    # Set MAMBA_CUDA_USE_FAST_MATH=0 for higher precision
+    use_fast_math = os.environ.get("MAMBA_CUDA_USE_FAST_MATH", "1") == "1"
+    if use_fast_math:
+        extra_cuda_cflags.append("--use_fast_math")
+    else:
+        extra_cuda_cflags.append("--ftz=true")  # Flush-to-zero for denormals
+    
     _selective_scan_cuda_module = load_inline(
         name="mamba_windows_selective_scan_cuda",
         cpp_sources=cpp_source,
         cuda_sources=cuda_source,
         functions=["selective_scan_cuda_forward", "selective_scan_cuda_forward_with_state"],
         verbose=False,
-        extra_cuda_cflags=["-O3", "--use_fast_math", "-allow-unsupported-compiler"] + arch_flags,
+        extra_cuda_cflags=extra_cuda_cflags + arch_flags,
     )
     return _selective_scan_cuda_module
 
