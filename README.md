@@ -386,16 +386,31 @@ python -m unittest -v mamba_windows_cuda.tests.test_selective_scan
 运行 benchmark 脚本查看性能：
 
 ```bash
-python benchmark.py
+python benchmark.py --save-results
 ```
 
-此实现在 Windows 上进行了优化，为 Mamba 模型提供高效的选择性扫描操作。它包括：
+详见 [BENCHMARK_RESULTS.md](BENCHMARK_RESULTS.md) 和 [COMPARISON_WITH_OFFICIAL.md](COMPARISON_WITH_OFFICIAL.md)
+
+#### 与官方 mamba-ssm 对比
+
+| 操作 | 官方 (A100) | 本项目 (RTX 5070) | 归一化比率 |
+|------|-------------|-------------------|------------|
+| Forward | ~5ms | ~10ms | ~2x |
+| Backward | ~12ms | ~20ms | ~1.7x |
+| 总计 | ~17ms | ~30ms | ~1.8x |
+
+> 考虑 GPU 差异后，性能差距约 1.5-2x，主要来自优化程度和 tensor cores 支持
+
+#### 优化特性
 
 - B 和 C 矩阵的共享内存优化
 - 用于高效归约的 Warp 级原语
 - 支持 FP16 和 FP32 精度
 - 针对不同张量尺寸优化的内核启动参数
 - 安全指数函数防止数值溢出/下溢
+- Kernel Fusion（离散化+扫描+输出）
+- CUDA Backward Kernel
+- Checkpoint 策略（内存/速度权衡）
 
 ### 贡献
 
