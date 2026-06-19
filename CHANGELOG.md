@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-06-19
+
+### Added
+- **CUDA Backward Kernel**: Native CUDA backward pass with Mamba-1 recomputation strategy
+  - `SelectiveScanFn`: autograd Function using CUDA backward kernel
+  - ~1.6-1.9x training speedup vs PyTorch backward
+  - Memory efficient: recomputes intermediates instead of saving them
+- **Kernel Fusion**: Discretization + scan + output merged into single CUDA kernel
+  - `selective_scan_cuda_ext.py`: fused forward + backward implementation
+  - 1.4-1.8x inference speedup, 1.6-1.9x training speedup
+- **Checkpoint Strategies**: Configurable memory/speed tradeoff for training
+  - Level 0 (save all): fastest backward, most memory
+  - Level 1 (recompute): 10-15% slower backward, 40%+ memory savings
+
+### Changed
+- **SelectiveScanCuda.forward()**: Now uses CUDA backward by default (memory efficient)
+  - Falls back to PyTorch backward only when `h_prev` is provided (stateful mode)
+- **Benchmark**: Updated with fused vs original comparison data
+
 ## [0.4.0] - 2026-06-08
 
 ### Added

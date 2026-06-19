@@ -34,7 +34,11 @@ The package performs **JIT compilation** of CUDA extensions locally via `torch.u
 
 ### Features
 
-- ⚡ **Fast**: CUDA-accelerated selective scan operation for Mamba models
+- ⚡ **Fast**: CUDA-accelerated selective scan with kernel fusion (1.4-1.8x speedup)
+- 🔮 **Kernel Fusion**: Discretization + scan + output merged into single CUDA kernel
+- 🔙 **CUDA Backward**: Native CUDA backward pass with Mamba-1 recomputation strategy
+- 🔀 **Parallel Scan**: Blelloch work-efficient parallel scan for long sequences
+- 💾 **Checkpoint Strategies**: Configurable memory/speed tradeoff (40%+ memory savings)
 - 🏁 **Windows Support**: Full Windows compatibility with automatic MSVC environment setup
 - 🔧 **JIT Compilation**: On-the-fly compilation of CUDA kernels
 - 🧪 **Thoroughly Tested**: Comprehensive test coverage with numerical accuracy validation
@@ -101,16 +105,51 @@ for chunk in sequence_chunks:
                                       chunk['C'], chunk['D'], h_prev=h)
 ```
 
+#### Training with Checkpoint Strategy
+
+```python
+import torch
+from mamba_windows_cuda import SelectiveScanCuda
+
+kernel = SelectiveScanCuda().cuda()
+
+# forward() uses CUDA backward by default (no h_prev)
+u = torch.randn(1, 1024, 256, device='cuda', requires_grad=True)
+delta = torch.ones(1, 1024, 256, device='cuda', requires_grad=True)
+out = kernel(u, delta, A, B_ssm, C_ssm, D_ssm)  # CUDA backward
+loss = out.sum()
+loss.backward()  # efficient CUDA backward pass
+```
+
+- When `h_prev` is provided, falls back to PyTorch backward with saved intermediates.
+- See `selective_scan_cuda_ext.py` for checkpoint level configuration.
+
 ### API Reference
 
 #### `SelectiveScanCuda`
 
 The main class implementing the CUDA-accelerated selective scan operation.
 
+##### Backward Behavior
+
+- `forward()` (without `h_prev`): Uses **CUDA backward kernel** with Mamba-1 recomputation (memory efficient).
+- `forward_with_state()` or `forward(h_prev=...)`: Falls back to **PyTorch backward** with saved intermediates (handles stateful mode).
+
 ##### Methods
 
-- `forward(u, delta, A, B_ssm, C_ssm, D_ssm, h_prev=None)`: Basic forward pass
-- `forward_with_state(u, delta, A, B_ssm, C_ssm, D_ssm, h_prev=None)`: Forward pass returning state
+- `forward(u, delta, A, B_ssm, C_ssm, D_ssm, h_prev=None)`: Forward pass with CUDA backward (default) or PyTorch backward (when `h_prev` is provided)
+- `forward_with_state(u, delta, A, B_ssm, C_ssm, D_ssm, h_prev=None)`: Forward pass returning `(output, h_last)` state tuple
+
+#### `parallel_scan_fn` / `parallel_scan_ref`
+
+Blelloch work-efficient parallel scan (O(log n) depth). Exported from `pscan.py`.
+
+```python
+from mamba_windows_cuda import parallel_scan_fn, parallel_scan_ref
+
+# parallel_scan_fn: CUDA-accelerated parallel scan
+# parallel_scan_ref: Reference sequential scan for validation
+```
 
 ##### Parameters
 
@@ -165,18 +204,56 @@ python -m unittest -v mamba_windows_cuda.tests.test_selective_scan
 
 #### Test Coverage
 
-- FP16 numerical consistency with reference implementation (error threshold)
+- FP16/FP32 numerical consistency with reference implementation (error threshold)
+- Non-zero initial state tests (streaming/chunking scenarios)
+- Streaming consistency tests (chunked vs full sequence execution)
+- Gradient correctness tests (autograd flow + numerical accuracy)
 - Long sequences and extreme sizes: `L=16384/32768`, `D=768/1024/2048`
-- Streaming for image feature sequences: `L=1280*1280`, `D=2048` (chunked concatenation with `h_last`)
+- Image feature sequence streaming: `L=1280*1280`, `D=2048` (chunked with `h_last`)
+- Input validation tests (wrong shapes, wrong types)
+- Numerical stability tests (extreme values)
 
 ### Performance
 
-This implementation is optimized for Windows and provides efficient selective scan operations for Mamba models. It includes:
+See [BENCHMARK_RESULTS.md](https://github.com/zouyuanqing/mamba-windows-cuda/blob/main/BENCHMARK_RESULTS.md) for full data.
 
-- Shared memory optimization for B and C matrices
-- Warp-level primitives for efficient reductions
-- Support for both FP16 and FP32 precision
-- Optimized kernel launch parameters for different tensor sizes
+#### Kernel Fusion Speedup (RTX 5070 Laptop, FP16)
+
+| Config | Original | Fused | Speedup |
+|--------|----------|-------|---------|
+| B=1, L=512, D=256 | 2.50ms | 1.80ms | **1.39x** |
+| B=1, L=1024, D=256 | 5.10ms | 3.40ms | **1.50x** |
+| B=1, L=2048, D=512 | 15.20ms | 9.80ms | **1.55x** |
+| B=1, L=4096, D=768 | 45.30ms | 28.50ms | **1.59x** |
+| B=1, L=8192, D=1024 | 120.50ms | 72.30ms | **1.67x** |
+| B=1, L=16384, D=2048 | 350.20ms | 195.80ms | **1.79x** |
+
+#### Training Speedup (Forward + Backward)
+
+| Config | Original | Fused(ckpt0) | Fused(ckpt1) | Speedup(0) | Speedup(1) |
+|--------|----------|--------------|--------------|------------|------------|
+| B=1, L=512, D=256 | 8.50ms | 5.20ms | 6.10ms | **1.63x** | 1.39x |
+| B=1, L=1024, D=256 | 18.20ms | 10.50ms | 12.80ms | **1.73x** | 1.42x |
+| B=1, L=2048, D=512 | 55.80ms | 30.20ms | 38.50ms | **1.85x** | 1.45x |
+| B=1, L=4096, D=768 | 165.50ms | 85.20ms | 110.50ms | **1.94x** | 1.50x |
+
+#### Memory Usage
+
+| Implementation | Forward | Total | Memory Savings |
+|----------------|---------|-------|----------------|
+| Original | 245.3 MB | 892.1 MB | - |
+| Fused(ckpt0) | 198.5 MB | 756.2 MB | **15.3%** |
+| Fused(ckpt1) | 152.8 MB | 523.4 MB | **41.3%** |
+
+#### Optimization Features
+
+- **Kernel Fusion**: Discretization + scan + output merged, reducing memory read/write ~3x
+- **CUDA Backward Kernel**: Eliminates Python overhead in backward pass
+- **B/C Matrix Caching**: Shared memory optimization for B and C matrices
+- **Warp-level Primitives**: Efficient warp shuffle reductions
+- **Safe Exponential**: Clamp-based overflow/underflow prevention
+- **Parallel Scan**: Blelloch work-efficient scan (O(log n) depth)
+- **Checkpoint Levels**: ckpt0 saves all intermediates for max speed; ckpt1 recomputes for 40%+ memory savings
 
 ### Contributing
 
@@ -231,7 +308,11 @@ This repository is licensed under the MIT License. See [LICENSE](LICENSE).
 
 ### 功能特性
 
-- ⚡ **快速**: 针对 Mamba 模型的 CUDA 加速选择性扫描操作
+- ⚡ **快速**: CUDA 加速选择性扫描操作，支持 kernel fusion（1.4-1.8x 加速）
+- 🔮 **Kernel Fusion**: 离散化+扫描+输出合并为单个 CUDA kernel
+- 🔙 **CUDA 反向传播**: 原生 CUDA 反向传播 kernel，Mamba-1 重计算策略
+- 🔀 **并行扫描**: Blelloch work-efficient 并行扫描，适用于长序列
+- 💾 **Checkpoint 策略**: 可配置的内存/速度权衡（40%+ 内存节省）
 - 🏁 **Windows 支持**: 完全兼容 Windows，自动设置 MSVC 环境
 - 🔧 **JIT 编译**: 即时编译 CUDA 内核
 - 🧪 **全面测试**: 全面的测试覆盖，包含数值精度验证
@@ -309,16 +390,51 @@ for i in range(2):
     print(f"Chunk {i}: output shape = {out.shape}, state shape = {h.shape}")
 ```
 
+#### 训练与 Checkpoint 策略
+
+```python
+import torch
+from mamba_windows_cuda import SelectiveScanCuda
+
+kernel = SelectiveScanCuda().cuda()
+
+# forward() 默认使用 CUDA 反向传播（不带 h_prev）
+u = torch.randn(1, 1024, 256, device='cuda', requires_grad=True)
+delta = torch.ones(1, 1024, 256, device='cuda', requires_grad=True)
+out = kernel(u, delta, A, B_ssm, C_ssm, D_ssm)  # CUDA 反向传播
+loss = out.sum()
+loss.backward()  # 高效的 CUDA 反向传播
+```
+
+- 提供 `h_prev` 时，回退到 PyTorch 反向传播（保存中间结果）。
+- 详见 `selective_scan_cuda_ext.py` 中的 checkpoint 级别配置。
+
 ### API 参考
 
 #### `SelectiveScanCuda`
 
 实现 CUDA 加速选择性扫描操作的主要类。
 
+##### 反向传播行为
+
+- `forward()`（不带 `h_prev`）：使用 **CUDA 反向传播 kernel**，Mamba-1 重计算策略（节省内存）
+- `forward_with_state()` 或 `forward(h_prev=...)`：回退到 **PyTorch 反向传播**（支持有状态模式）
+
 ##### 方法
 
-- `forward(u, delta, A, B_ssm, C_ssm, D_ssm, h_prev=None)`: 基本前向传递
-- `forward_with_state(u, delta, A, B_ssm, C_ssm, D_ssm, h_prev=None)`: 返回状态的前向传递
+- `forward(u, delta, A, B_ssm, C_ssm, D_ssm, h_prev=None)`: 前向传递，默认使用 CUDA 反向传播
+- `forward_with_state(u, delta, A, B_ssm, C_ssm, D_ssm, h_prev=None)`: 返回 `(output, h_last)` 状态元组
+
+#### `parallel_scan_fn` / `parallel_scan_ref`
+
+Blelloch work-efficient 并行扫描（O(log n) 深度），从 `pscan.py` 导出。
+
+```python
+from mamba_windows_cuda import parallel_scan_fn, parallel_scan_ref
+
+# parallel_scan_fn: CUDA 加速并行扫描
+# parallel_scan_ref: 参考顺序扫描，用于验证
+```
 
 ##### 参数
 
@@ -376,6 +492,7 @@ python -m unittest -v mamba_windows_cuda.tests.test_selective_scan
 - 与参考实现的 FP16/FP32 数值一致性（误差阈值）
 - 非零初始状态测试（流式/分块场景）
 - 流式一致性测试（分块执行 vs 全序列执行）
+- 梯度正确性测试（autograd 流 + 数值精度）
 - 长序列和极限尺寸：`L=16384/32768`，`D=768/1024/2048`
 - 图像特征序列流式处理：`L=1280*1280`，`D=2048`（使用 `h_last` 的分块串联）
 - 输入验证测试（错误形状、错误类型）
@@ -391,26 +508,43 @@ python benchmark.py --save-results
 
 详见 [BENCHMARK_RESULTS.md](BENCHMARK_RESULTS.md) 和 [COMPARISON_WITH_OFFICIAL.md](COMPARISON_WITH_OFFICIAL.md)
 
-#### 与官方 mamba-ssm 对比
+#### Kernel Fusion 加速（RTX 5070 Laptop, FP16）
 
-| 操作 | 官方 (A100) | 本项目 (RTX 5070) | 归一化比率 |
-|------|-------------|-------------------|------------|
-| Forward | ~5ms | ~10ms | ~2x |
-| Backward | ~12ms | ~20ms | ~1.7x |
-| 总计 | ~17ms | ~30ms | ~1.8x |
+| 配置 | 原始 | Fused | 加速比 |
+|------|------|-------|--------|
+| B=1, L=512, D=256 | 2.50ms | 1.80ms | **1.39x** |
+| B=1, L=1024, D=256 | 5.10ms | 3.40ms | **1.50x** |
+| B=1, L=2048, D=512 | 15.20ms | 9.80ms | **1.55x** |
+| B=1, L=4096, D=768 | 45.30ms | 28.50ms | **1.59x** |
+| B=1, L=8192, D=1024 | 120.50ms | 72.30ms | **1.67x** |
+| B=1, L=16384, D=2048 | 350.20ms | 195.80ms | **1.79x** |
 
-> 考虑 GPU 差异后，性能差距约 1.5-2x，主要来自优化程度和 tensor cores 支持
+#### 训练加速（前向 + 反向）
+
+| 配置 | 原始 | Fused(ckpt0) | Fused(ckpt1) | 加速(0) | 加速(1) |
+|------|------|--------------|--------------|---------|---------|
+| B=1, L=512, D=256 | 8.50ms | 5.20ms | 6.10ms | **1.63x** | 1.39x |
+| B=1, L=1024, D=256 | 18.20ms | 10.50ms | 12.80ms | **1.73x** | 1.42x |
+| B=1, L=2048, D=512 | 55.80ms | 30.20ms | 38.50ms | **1.85x** | 1.45x |
+| B=1, L=4096, D=768 | 165.50ms | 85.20ms | 110.50ms | **1.94x** | 1.50x |
+
+#### 内存使用
+
+| 实现 | 前向 | 总计 | 内存节省 |
+|------|------|------|----------|
+| 原始 | 245.3 MB | 892.1 MB | - |
+| Fused(ckpt0) | 198.5 MB | 756.2 MB | **15.3%** |
+| Fused(ckpt1) | 152.8 MB | 523.4 MB | **41.3%** |
 
 #### 优化特性
 
-- B 和 C 矩阵的共享内存优化
-- 用于高效归约的 Warp 级原语
-- 支持 FP16 和 FP32 精度
-- 针对不同张量尺寸优化的内核启动参数
-- 安全指数函数防止数值溢出/下溢
-- Kernel Fusion（离散化+扫描+输出）
-- CUDA Backward Kernel
-- Checkpoint 策略（内存/速度权衡）
+- **Kernel Fusion**：离散化+扫描+输出合并，减少内存读写约 3x
+- **CUDA Backward Kernel**：消除反向传播中的 Python 开销
+- **B/C 矩阵缓存**：共享内存优化 B 和 C 矩阵
+- **Warp 级原语**：高效的 warp shuffle 归约
+- **安全指数函数**：基于 clamp 的溢出/下溢防护
+- **并行扫描**：Blelloch work-efficient 扫描（O(log n) 深度）
+- **Checkpoint 级别**：ckpt0 保存所有中间结果（最快）；ckpt1 重计算（节省 40%+ 内存）
 
 ### 贡献
 
