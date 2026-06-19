@@ -164,7 +164,7 @@ mamba-windows-cuda/
 2. **性能差距**
    - 比官方慢 ~1.5-2x (归一化后)
    - 没有使用 tensor cores
-   - Backward 是 PyTorch 实现
+   - Backward 已升级为 CUDA kernel（v0.5.0，Mamba-1 重计算策略）；`h_prev` 模式仍使用 PyTorch backward
 
 3. **平台限制**
    - 主要针对 Windows

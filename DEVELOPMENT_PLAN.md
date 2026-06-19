@@ -289,38 +289,77 @@ if __name__ == '__main__':
 
 ## 三、开发任务清单
 
-### Phase 1: 输入验证增强（优先级：高）
+> 状态更新（2026-06-19）：Phase 1-4 已全部完成并随 v0.2.0 - v0.5.0 发布。Phase 5 部分完成。
 
-- [ ] 添加 CHECK_SHAPE 宏
-- [ ] 添加设备检查 (is_cuda)
-- [ ] 添加连续性检查 (stride)
-- [ ] 添加 h_prev 形状验证
-- [ ] 更新 Python 端的输入检查
+### Phase 1: 输入验证增强 ✅ v0.2.0
 
-### Phase 2: 测试覆盖增强（优先级：高）
+- [x] 添加 CHECK_SHAPE 宏
+- [x] 添加设备检查 (is_cuda)
+- [x] 添加连续性检查 (stride)
+- [x] 添加 h_prev 形状验证
+- [x] 更新 Python 端的输入检查
 
-- [ ] 添加非零 h_prev 测试用例
-- [ ] 添加参数化测试（不同 dtype、不同尺寸）
-- [ ] 添加精度阈值配置
-- [ ] 添加详细输出（max diff、mean diff）
+### Phase 2: 测试覆盖增强 ✅ v0.2.0 - v0.3.0
 
-### Phase 3: 数值稳定性（优先级：中）
+- [x] 添加非零 h_prev 测试用例
+- [x] 添加流式一致性测试（分块 vs 全序列）
+- [x] 添加梯度正确性测试（v0.3.0 autograd 支持）
+- [x] 添加输入验证测试（错误形状、错误类型）
+- [x] 添加数值稳定性测试（极端值）
+- [x] 添加精度阈值配置（FP16/FP32 区分）
+- [x] 添加详细输出（max diff、mean diff）
 
-- [ ] 添加编译选项开关（MAMBA_CUDA_USE_FAST_MATH）
-- [ ] 添加可选的 clamp 操作
-- [ ] 更新文档说明精度/速度权衡
+### Phase 3: 数值稳定性 ✅ v0.2.0
 
-### Phase 4: 文档和示例（优先级：中）
+- [x] 添加 safe_exp 函数（clamp 防止溢出/下溢）
+- [x] 添加编译选项开关（MAMBA_CUDA_USE_FAST_MATH）
+- [x] 更新文档说明精度/速度权衡
 
-- [ ] 完善 README 流式示例
-- [ ] 添加 benchmark.py
-- [ ] 添加 CHANGELOG.md
+### Phase 4: 文档和示例 ✅ v0.2.0 - v0.5.0
 
-### Phase 5: 版本发布（优先级：低）
+- [x] 完善 README 流式示例
+- [x] 添加 benchmark.py（支持 --save-results）
+- [x] 添加 CHANGELOG.md
+- [x] 添加 BENCHMARK_RESULTS.md（fusion vs 原始对比数据）
+- [x] 添加 COMPARISON_WITH_OFFICIAL.md（与官方 mamba-ssm 对标）
+- [x] README 同步 v0.5.0 新特性（v0.5.0 docs sync）
 
-- [ ] 更新版本号到 0.2.0
+### Phase 5: 版本发布
+
+- [x] 更新版本号到 0.5.0
 - [ ] 添加 GitHub Actions CI
-- [ ] 创建 Release
+- [ ] 创建 GitHub Release
+
+---
+
+## 三、计划外的关键进展（v0.3.0 - v0.5.0）
+
+这部分不在最初计划中，但实际推进过程中完成：
+
+### v0.3.0 - Autograd 支持
+
+- [x] `torch.autograd.Function` 包装
+- [x] PyTorch backward + 保存中间结果策略
+- [x] 梯度通过所有参数（u, delta, A, B, C, D, h_prev）
+
+### v0.4.0 - 并行扫描
+
+- [x] Blelloch work-efficient parallel scan（O(log n) 深度）
+- [x] `parallel_scan_fn` / `parallel_scan_ref` 导出
+- [x] 基于 mamba.py 的实现思路
+
+### v0.5.0 - CUDA Backward + Kernel Fusion
+
+- [x] 原生 CUDA backward kernel（Mamba-1 重计算策略）
+- [x] Kernel Fusion（离散化 + 扫描 + 输出合并到单 kernel）
+- [x] `SelectiveScanFn` 使用 CUDA backward（无 h_prev 时默认）
+- [x] Checkpoint 级别（ckpt0 vs ckpt1 内存/速度权衡）
+- [x] 实测 1.4-1.8x 推理加速 / 1.6-1.9x 训练加速
+- [x] 实测 41.3% 训练内存节省（ckpt1）
+
+---
+
+## 四、后续路线图（待规划）
 
 ---
 
@@ -340,17 +379,21 @@ if __name__ == '__main__':
 
 ---
 
-## 五、预期收益
+## 五、预期收益（已兑现）
 
-| 改进项 | 收益 |
-|--------|------|
-| 输入验证增强 | 防止越界访问，提供清晰错误信息 |
-| 测试覆盖增强 | 提高代码质量，防止回归 |
-| 数值稳定性 | 用户可选择精度/速度权衡 |
-| 文档完善 | 降低使用门槛，减少 issue |
-| Benchmark | 量化性能，便于优化 |
+| 改进项 | 收益 | 实际效果 |
+|--------|------|---------|
+| 输入验证增强 | 防止越界访问，提供清晰错误信息 | ✅ 全面 TORCH_CHECK 覆盖 |
+| 测试覆盖增强 | 提高代码质量，防止回归 | ✅ 含梯度/流式/数值稳定性测试 |
+| 数值稳定性 | 用户可选择精度/速度权衡 | ✅ MAMBA_CUDA_USE_FAST_MATH 开关 |
+| 文档完善 | 降低使用门槛，减少 issue | ✅ README + CHANGELOG + COMPARISON |
+| Benchmark | 量化性能，便于优化 | ✅ Fused vs Original 全套数据 |
+| **CUDA Backward**（计划外）| 训练效率 | ✅ 1.6-1.9x 训练加速 |
+| **Kernel Fusion**（计划外）| 推理效率 | ✅ 1.4-1.8x 推理加速 |
+| **Checkpoint 策略**（计划外）| 内存优化 | ✅ 41.3% 训练内存节省 |
 
 ---
 
 *计划制定时间：2026-06-08*
+*最近更新：2026-06-19（v0.5.0 进度同步）*
 *基于官方 state-spaces/mamba 仓库对标分析*
