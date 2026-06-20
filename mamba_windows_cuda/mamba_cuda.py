@@ -654,8 +654,12 @@ def _get_selective_scan_cuda_module():
         ]
 
     # Compile options
-    extra_cuda_cflags = ["-O3", "-allow-unsupported-compiler"]
-    
+    extra_cuda_cflags = ["-O3", "-allow-unsupported-compiler",
+                         "-DCCCL_IGNORE_MSVC_TRADITIONAL_PREPROCESSOR_WARNING",
+                         "-Xcompiler", "/Zc:preprocessor",
+                         "-Xcompiler", "/permissive-",
+                         "-Xcompiler", "/std:c++17"]
+
     use_fast_math = os.environ.get("MAMBA_CUDA_USE_FAST_MATH", "1") == "1"
     if use_fast_math:
         extra_cuda_cflags.append("--use_fast_math")
