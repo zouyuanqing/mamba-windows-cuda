@@ -247,13 +247,20 @@ See [BENCHMARK_RESULTS.md](https://github.com/zouyuanqing/mamba-windows-cuda/blo
 
 #### Optimization Features
 
+- **CUDA Backward V2 (Direct)**: Forward stores hidden states → backward reads directly, no recompute (Bwd/Fwd=2.0×, VRAM +65MB)
+- **CUDA Backward V1 (Recompute)**: Mamba-1 chunked recomputation, saves memory at 6.8× Bwd/Fwd cost
 - **Kernel Fusion**: Discretization + scan + output merged, reducing memory read/write ~3x
-- **CUDA Backward Kernel**: Eliminates Python overhead in backward pass
 - **B/C Matrix Caching**: Shared memory optimization for B and C matrices
 - **Warp-level Primitives**: Efficient warp shuffle reductions
 - **Safe Exponential**: Clamp-based overflow/underflow prevention
-- **Parallel Scan**: Blelloch work-efficient scan (O(log n) depth)
-- **Checkpoint Levels**: ckpt0 saves all intermediates for max speed; ckpt1 recomputes for 40%+ memory savings
+
+#### Forward+Backward Benchmark (B=2, D=96, L=6400, FP32, RTX 5070 Laptop)
+
+| Variant | Forward | Fwd+Bwd | Bwd/Fwd | VRAM | Strategy |
+|:---|:---|:---|:---|:---|:---|
+| **V2 Direct** | 3.0ms | **8.9ms** | **2.0×** | 129MB | Forward stores h, backward reads directly |
+| V1 Recompute | 3.7ms | 28.3ms | 6.8× | 64MB | Chunked recomputation (Mamba-1 style) |
+| PyTorch Ref | ~200ms | ~800ms | ~3× | 500MB+ | Pure Python autograd |
 
 ### Contributing
 
